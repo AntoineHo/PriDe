@@ -13,6 +13,9 @@ from multiprocessing import Pool, TimeoutError
 import subprocess
 
 from Bio import SeqIO # Need BIOPYTHON SEQ/IO
+from Bio.SeqRecord import SeqRecord
+from Bio.Seq import Seq
+from Bio.Alphabet import IUPAC
 from Bio.Blast.Applications import NcbimakeblastdbCommandline
 from Bio.Blast.Applications import NcbiblastnCommandline
 import primer3 # Need prrimer3 and primer3-py
@@ -182,6 +185,9 @@ def get_primers(region) :
 	'PRIMER_PAIR_MAX_COMPL_END': 8,
 	'PRIMER_PRODUCT_SIZE_RANGE': [PRIMER_PRODUCT_SIZE_RANGE]
 	})
+	primer_dict["CHROM"] = region.ctg
+	primer_dict["START"] = region.start
+	primer_dict["END"] = region.end
 	primer_dict["REGION_ID"] = region.name
 	return primer_dict
 
@@ -191,7 +197,7 @@ def return_primers(regions) :
 	return [r for sublist in primers for r in sublist]
 
 def main() :
-	parser = argparse.ArgumentParser(description='Find primers in a fasta assembly from a bed file')
+	parser = argparse.ArgumentParser(description='Find primers in a fasta assembly from a bed file and test for alignment in reference assembly.')
 	subparsers = parser.add_subparsers()
 	des = subparsers.add_parser('design')
 	des.add_argument('Reference',nargs=1,type=str,help="A fasta file containing the target sequences")
@@ -201,6 +207,12 @@ def main() :
 	des.add_argument('--processes','-p',nargs=1,type=int,default=[4],required=False,help="Maximum threads to use. Default: 4.")
 	#parser.add_argument('--keep-temp', '-kp',type=str_to_bool, nargs='?', const=True, default=False, help="Keep temporary files (single alignments and single fasta). Unset by default.")
 	des.set_defaults(func=design_primers)
+
+	"""
+	par = subparsers.add_parser('parse')
+	par.add_argument('Primers',nargs=1,type=str,help="A TSV file result of the design command")
+	par.set_defaults(func=parse_designed_primers)
+	"""
 
 	test = subparsers.add_parser('test')
 	test.add_argument('Primers',nargs=1,type=str,help="A fasta file containing the primers")
@@ -215,7 +227,70 @@ def main() :
 
 	print("Done")
 	sys.exit(0)
-	#return parser.parse_args()
+
+def parse_designed_primers(filename) :
+	if os.path.isfile(filename) :
+		filename = os.path.abspath(filename)
+	else :
+		raise Exception("ERROR: {} does not exist!".format(filename))
+
+	path, ext = os.path.splitext(filename)
+	clear_output = os.path.join(path + ".clear.tsv")
+	fasta_output = os.path.join(path + ".fasta")
+
+	HDcolnum = {}
+	parsed = []
+	num_pairs = 0
+	for n, line in enumerate(open(filename, "r")) :
+		if n == 0 :
+			headers = line.strip().split("\t")
+			for n, col in enumerate(headers) :
+				HDcolnum[col] = n
+				if "PRIMER_RIGHT" in col and "GC_PERCENT" in col :
+					num_pairs += 1
+		else :
+			s = line.strip().split("\t")
+			for n in range(0, num_pairs) :
+				if s[HDcolnum["PRIMER_LEFT_"+str(n)+"_SEQUENCE"]] != "" :
+					p = {} # "ID":[], "CHROM":[], "START":[], "END":[], "LEFT":[], "RIGHT":[], "LEFT_GC":[], "RIGHT_GC":[], "LEFT_TM":[], "RIGHT_TM":[]
+					p["ID"] = s[HDcolnum["REGION_ID"]]
+					p["CHROM"] = s[HDcolnum["CHROM"]]
+					p["START"] = get_start(s[HDcolnum["START"]], s[HDcolnum["PRIMER_LEFT_"+str(n)]])
+					p["END"] = get_end(s[HDcolnum["START"]], s[HDcolnum["PRIMER_RIGHT_"+str(n)]])
+					p["PRODUCT_SIZE"] = s[HDcolnum["PRIMER_PAIR_"+str(n)+"_PRODUCT_SIZE"]]
+					p["LEFT"] = s[HDcolnum["PRIMER_LEFT_"+str(n)+"_SEQUENCE"]]
+					p["RIGHT"] = s[HDcolnum["PRIMER_RIGHT_"+str(n)+"_SEQUENCE"]]
+					p["LEFT_GC"] = s[HDcolnum["PRIMER_RIGHT_"+str(n)+"_GC_PERCENT"]]
+					p["RIGHT_GC"] = s[HDcolnum["PRIMER_RIGHT_"+str(n)+"_GC_PERCENT"]]
+					p["LEFT_TM"] = s[HDcolnum["PRIMER_RIGHT_"+str(n)+"_TM"]]
+					p["RIGHT_TM"] = s[HDcolnum["PRIMER_RIGHT_"+str(n)+"_TM"]]
+					parsed.append(p)
+
+
+	with open(clear_output, 'w') as output_file :
+		dict_writer = csv.DictWriter(output_file, fieldnames=parsed[0].keys(), delimiter="\t")
+		dict_writer.writeheader()
+		dict_writer.writerows(parsed)
+
+	sequences = []
+	for cd in parsed :
+		desc = "left_primer|START:{}-{}|GC:{}|TM:{}".format(cd["CHROM"], cd["START"], cd["LEFT_GC"], cd["LEFT_TM"])
+		sequences.append(SeqRecord(Seq(cd["LEFT"], IUPAC.ambiguous_dna), id=cd["ID"] + "_LEFT", description=desc))
+		desc = "right_primer|END:{}-{}|GC:{}|TM:{}".format(cd["CHROM"], cd["END"], cd["RIGHT_GC"], cd["RIGHT_TM"])
+		sequences.append(SeqRecord(Seq(cd["RIGHT"], IUPAC.ambiguous_dna), id=cd["ID"] + "_RIGHT", description=desc))
+
+	with open(fasta_output, "w") as output_handle :
+		SeqIO.write(sequences, output_handle, "fasta")
+
+
+def get_start(real_start, tuple_region_start_0_indexed_region_length) :
+	return int(real_start) + int(tuple_region_start_0_indexed_region_length.split(",")[0][1:]) + 1
+
+def get_end(real_start, tuple_region_end_0_indexed_region_length) :
+	return int(real_start) + int(tuple_region_end_0_indexed_region_length.split(",")[0][1:]) + 1
+
+def return_line(headers) :
+	pass
 
 def test_primers(args) :
 	ref = args.Reference[0]
@@ -239,15 +314,15 @@ def test_primers(args) :
 	else :
 		pass
 	# 3. Run short-blast
-	result = os.path.join(iTFH.outdir, os.path.basename(iTFH.primers) + ".blast")
+	result = os.path.join(iTFH.outdir, os.path.basename(iTFH.primers) + ".blast.tsv")
 	result_tmp = os.path.join(iTFH.outdir, os.path.basename(iTFH.primers) + ".tmp")
-	cline = NcbiblastnCommandline(query=iTFH.primers, db=db, task="blastn-short", num_threads=nproc, outfmt="10 qseqid sseqid sstart send mismatch length pident qseq sseq", out=result_tmp)
+	cline = NcbiblastnCommandline(query=iTFH.primers, db=db, task="blastn-short", num_threads=nproc, outfmt="6 qseqid sseqid sstart send mismatch qlen length pident qseq sseq", out=result_tmp)
 	print("Running:")
 	print(cline)
 	run(cline.__str__())
 
 	f = open(result, "w")
-	f.write("PrimerName,TargetName,TargetStart,TargetEnd,#Mismatches,AlignedLength,%Identity,PrimerSeq,ContigSeq\n")
+	f.write("PrimerName\tTargetName\tTargetStart\tTargetEnd\t#Mismatches\tPrimerLength\tAlignedLength\t%Identity\tPrimerSeq\tContigSeq\n")
 	f.writelines(open(result_tmp, "r").readlines())
 	f.close()
 	os.remove(result_tmp)
@@ -277,10 +352,13 @@ def design_primers(args) :
 				keys.append(k)
 			continue
 
-	with open(os.path.join(iFH.outdir, 'primers.csv'), 'w') as output_file :
+	of = os.path.join(iFH.outdir, 'primers.tsv')
+	with open(of, 'w') as output_file :
 		dict_writer = csv.DictWriter(output_file, fieldnames=keys, delimiter="\t")
 		dict_writer.writeheader()
 		dict_writer.writerows(primers)
+
+	parse_designed_primers(of)
 
 def run(cmd) :
 	proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
