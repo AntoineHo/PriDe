@@ -119,6 +119,8 @@ def get_regions(job) :
 
 	for line in chunk :
 		s = line.split("\t")
+		if len(s) < 3 : # just in case of returns in middle of bed file or last line
+			continue
 		ctg = s[0]
 		start = int(s[1]) - offset
 		end = int(s[2]) + offset
@@ -263,6 +265,8 @@ def parse_designed_primers(filename) :
 		else :
 			s = line.strip().split("\t")
 			for n in range(0, num_pairs) :
+				if len(s) < HDcolnum["PRIMER_LEFT_"+str(n)+"_SEQUENCE"] : # In case sequence returned but no primers
+					continue
 				if s[HDcolnum["PRIMER_LEFT_"+str(n)+"_SEQUENCE"]] != "" :
 					p = {} # "ID":[], "CHROM":[], "START":[], "END":[], "LEFT":[], "RIGHT":[], "LEFT_GC":[], "RIGHT_GC":[], "LEFT_TM":[], "RIGHT_TM":[]
 					p["ID"] = s[HDcolnum["REGION_ID"]] + "_" + str(n)
